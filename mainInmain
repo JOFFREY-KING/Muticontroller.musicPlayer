@@ -1,0 +1,202 @@
+#include "sys.h"
+#include "delay.h" 
+#include "led.h"  
+#include "usart.h" 
+#include "lcd.h" 
+#include "ltdc.h"   
+#include "sdram.h"    
+#include "key.h" 
+#include "malloc.h" 
+#include "usmart.h"  
+#include "w25qxx.h"    
+#include "sdio_sdcard.h" 
+#include "text.h"
+#include "atk_ncr.h"
+#include "touch.h"		  
+#include "adc.h"
+#include "ap3216c.h"
+#include "remote.h"
+#include "ff.h"  
+#include "exfuns.h"  
+#include "text.h"	   
+#include "wm8978.h"	 
+#include "audioplay.h"	
+
+//最大记录的轨迹点数
+atk_ncr_point READ_BUF[200];					 
+ 
+int main(void)
+{     
+  u8 keyRed;
+	u8 t=0;	
+	u8 *str=0; 
+	
+	u8 keyPuse;
+	
+	u8 i=0;	    	
+	u8 tcnt=0;    
+	u8 res[10];
+	u8 keyWriting;		    
+	u16 pcnt=0;
+	u8 mode=4;			//默认是混合模式	    	    
+ 	u16 lastpos[2];		//最后一次的数据 
+  u16 ir,als,ps;
+	
+	Stm32_Clock_Init(360,25,2,8);//设置时钟,180Mhz
+	delay_init(180);			//初始化延时函数 
+	uart_init(90,115200);		//初始化串口波特率为115200  
+   	LED_Init();					//初始化与LED连接的硬件接口
+	Adc_Init(); 				//初始化ADC
+	SDRAM_Init();				//初始化SDRAM 
+	LCD_Init();					//初始化LCD
+	KEY_Init();					//初始化按键
+	W25QXX_Init();				//初始化W25Q256
+	tp_dev.init();				//初始化触摸屏
+ 	my_mem_init(SRAMIN);		//初始化内部内存池
+	my_mem_init(SRAMEX);		//初始化外部内存池
+	my_mem_init(SRAMCCM);		//初始化CCM内存池  
+	alientek_ncr_init();		//初始化手写识别 
+	
+	//innitialling red controller model
+	Remote_Init();				//红外接收初始化	
+
+	//innitialling music model
+  WM8978_Init();				//初始化WM8978
+	WM8978_HPvol_Set(40,40);	//耳机音量设置
+	WM8978_SPKvol_Set(50);		//喇叭音量设置
+	exfuns_init();				//为fatfs相关变量申请内存  
+  f_mount(fs[0],"0:",1); 		//挂载SD卡  
+ 	f_mount(fs[1],"1:",1); 		//挂载SPI FLASH
+	
+
+	while(font_init())			//检查字库
+	{	    
+		LCD_ShowString(60,50,200,16,16,"Font Error!");
+		delay_ms(200);				  
+		LCD_Fill(60,50,240,66,WHITE);//清除显示	     
+	}
+RESTART:
+  	POINT_COLOR=BLUE;      
+	Show_Str(60,10,200,16,"JSD+ZYM INDUSTRY",16,0);	
+	  POINT_COLOR=RED;   
+		    	 
+	Show_Str(60,30,200,16,"ALS:",16,0);		
+	LCD_ShowString(60,50,200,16,16,"TEMPERATE: 00.00C");	
+	
+	Show_Str(60,70,200,16,"识别结果:",16,0);	
+	LCD_ShowString(60,90,200,16,16,"SYMBOL:");	  
+	
+	LCD_DrawRectangle(19,150,lcddev.width-20,lcddev.height-5);
+ 	POINT_COLOR=BLUE;      
+	tcnt=100;
+	short temp; 
+	
+	while(AP3216C_Init())		//检测不到AP3216C
+	{
+		LCD_ShowString(30,130,200,16,16,"AP3216C Check Failed!");
+		delay_ms(500);
+		LCD_ShowString(30,130,200,16,16,"Please Check!        ");
+		delay_ms(500);
+		LED0=!LED0;				//DS0闪烁
+	}
+	
+	
+	while(1)
+	{
+		//温度部分代码：
+		keyPuse=Remote_Scan();
+		temp=Get_Temprate();	//得到温度值 
+		if(temp<0)
+		{
+			temp=-temp;
+			LCD_ShowString(60+10*8,110,16,16,16,"-");	//显示负号
+		}else LCD_ShowString(60+10*8,110,16,16,16," ");	//无符号
+		
+		LCD_ShowxNum(60+11*8,50,temp/100,2,16,0);		//显示整数部分
+		LCD_ShowxNum(60+14*8,50,temp%100,2,16,0X80);	//显示小数部分 
+		
+		AP3216C_ReadData(&ir,&ps,&als);	//读取数据 
+  
+    LCD_ShowNum(60+32,30,als,5,16);//显示ALS数据 
+		
+		if(als<=5){
+		   audio_play();
+			if(keyPuse==82){
+			  break;
+		  }
+		}
+		
+		//use Red controller as a main way to control the system
+		keyRed=Remote_Scan();
+
+		if(keyRed)
+		{	 
+			if(keyRed==104){
+			  LCD_ShowNum(86,90,keyRed,3,16);		//显示键值	 
+				audio_play();
+				if(keyPuse==82){
+			     break;
+		    }
+			}
+			
+		}
+		
+
+		 if(keyRed==152){
+			      //Using writting controller
+				while(1){
+				 
+					
+					  LCD_Fill(116,170,136+8*8,170+16,WHITE);	//clean之前的显示
+			      LCD_ShowString(116,170,200,16,16,str);	//显示SYMBOL
+						keyWriting=KEY_Scan(0);
+		
+		if(keyWriting==KEY2_PRES&&(tp_dev.touchtype&0X80)==0)
+		{
+			TP_Adjust();  	//屏幕校准
+			LCD_Clear(WHITE); 
+			goto RESTART;	//重新加载界面
+		}
+		
+		if(keyWriting==KEY0_PRES)	
+		{
+			LCD_Fill(20,150,219,314,WHITE);//清除当前显示
+			mode++;
+			if(mode>4)mode=1;
+			switch(mode)
+			{
+				case 1:
+					Show_Str(80,207,200,16,"仅识别数字",16,0);	
+					break;	 	    
+				case 2:
+					Show_Str(64,207,200,16,"仅识别大写字母",16,0);	
+				 	break;	 	    
+				case 3:
+					Show_Str(64,207,200,16,"仅识别小写字母",16,0);	
+					break;	 	    
+				case 4:
+					Show_Str(88,207,200,16,"全部识别",16,0);	
+					break;	 
+			}
+			tcnt=100;
+		}		
+		
+		audio_play();
+
+		if(i==30)
+		{
+			i=0;
+			LED0=!LED0;
+		}	
+		}       
+	 }else delay_ms(10);	  
+		t++;
+		if(t==20)
+		{
+			t=0;
+			LED0=!LED0;
+		}
+		  	
+ }	
+
+}
